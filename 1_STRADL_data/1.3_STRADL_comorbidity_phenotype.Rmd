@@ -1,0 +1,46 @@
+---
+title: "STRADL_comorbidity_phenotypes"
+author: "Hannah Casey"
+date: "2023-02-15"
+output: html_document
+---
+
+The purpose of this script is to derived pain and depression comorbidity phenotypes for phenotypic and fMRI analysis in STRADL.
+
+```{r setup, include=FALSE}
+library(dplyr)
+```
+
+First, load in current MDD status (defined using QIDS) and pain level (definied using concurrent self-reported medication and linked presecription data)
+
+```{r Load in pain and depression phenotpyes}
+
+STRADL_current_depression <- read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_MDD.csv", header = TRUE)
+STRADL_pain <- read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_pain.csv", header = TRUE)
+```
+
+Combine pain and depression phenotypes and get comorbidity groups
+
+```{r get comorbidity groups}
+## Merge depression and pain phenotypes together
+STRADL_comorbidity <- inner_join(STRADL_current_depression, STRADL_pain[c("ID", "current_pain")], by = "ID")
+
+## Assign each participant to a comorbidity group
+STRADL_comorbidity$comorbidity <- NA
+STRADL_comorbidity$comorbidity[STRADL_comorbidity$current_depression == 0 & STRADL_comorbidity$current_pain == 0] <- "Pain-Dep-" ## No depression, no pain
+STRADL_comorbidity$comorbidity[STRADL_comorbidity$current_depression == 1 & STRADL_comorbidity$current_pain == 0] <- "Pain-Dep+" ## Depression, no pain
+STRADL_comorbidity$comorbidity[STRADL_comorbidity$current_depression == 0 & STRADL_comorbidity$current_pain == 1] <- "Pain+Dep-" ## Depression, no pain
+STRADL_comorbidity$comorbidity[STRADL_comorbidity$current_depression == 1 & STRADL_comorbidity$current_pain == 1] <- "Pain+Dep+" ## Depression, no pain
+
+table(STRADL_comorbidity$comorbidity)
+```
+
+Save comorbidity groups in STRADL
+
+```{r save comorbidity groups}
+
+write.csv(STRADL_comorbidity, "/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_comorbidity.csv", quote = FALSE, row.names = FALSE)
+
+```
+
+

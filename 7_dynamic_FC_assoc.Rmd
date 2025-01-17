@@ -1,0 +1,475 @@
+---
+title: "Association analysis of dynamic FC in pain and depression STRADL"
+author: "Hannah Casey"
+date: "2024-05-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+## Load packages
+library(dplyr)
+library(rstatix)
+library(RNOmni)
+library(Hmisc)
+library(MatchIt)
+library(tidyr)
+library(emmeans)
+library(ggplot2)
+library(patchwork)
+library(forcats)
+library(readxl)
+library(tidytext)
+#install.packages('coin')
+```
+
+Load in STRADL phenotypes 
+```{r STRADL Phenotypes, include=FALSE}
+## Get STRADL phenotypes
+STRADL_phenotype_QC_covariates <-  read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_phenotype_QC_covariates.csv", header = T)
+
+```
+
+Load in LEiDA output
+```{r LEiDA output, include=FALSE}
+## Get STRADL phenotypes
+LEiDA_results_dir <- "/Users/hannahcasey/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/extracted_results/"
+LEiDA_data_info <-  read.csv(paste0(LEiDA_results_dir, "data_info.csv"), header = T)
+LEiDA_dwell_time <-  read.csv(paste0(LEiDA_results_dir, "dwell_time.csv"), header = F)
+LEiDA_fractional_occupancy <-  read.csv(paste0(LEiDA_results_dir, "fractional_occupancy.csv"), header = F)
+
+n_clusters <- length(list.files(LEiDA_results_dir, pattern = "transitional_matrix.csv"))
+for (c in 1:n_clusters){
+  
+  assign(paste0("transitional_matrix_", c), 
+         read.csv(paste0(LEiDA_results_dir, list.files(LEiDA_results_dir, pattern = "transitional_matrix.csv")[c]), header = F))
+}
+
+## Load in Power atlas info
+cluster_regions <- read_excel("/Users/hannahcasey/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/writeup/power_atlas_info.xlsx")
+```
+
+Reformat LEiDA output
+```{r Reformat LEiDA, include=FALSE}
+## Get list of STRADL IDs in order of LEiDA output
+STRADL_LEiDA_IDs <- gsub("_control.mat|_case.mat", "", LEiDA_data_info$name)
+
+## Combine all transitional matrixes into single dataframe
+transitional_matrix <- data_frame(ID = STRADL_LEiDA_IDs)
+
+for (c in 1:n_clusters){
+  
+  matrix <- get(paste0("transitional_matrix_", c))
+  names(matrix) <- paste0("cluster_", 1:n_clusters, "_to_", "cluster_", c)
+  transitional_matrix <- cbind(transitional_matrix,matrix)
+}
+
+## Give descriptive column names to other LEiDA outputs
+names(LEiDA_dwell_time) <- paste0("dwell_time_", 1:n_clusters)
+names(LEiDA_fractional_occupancy) <- paste0("fractional_occupancy_", 1:n_clusters)
+
+## Combine all results into single dataframe
+LEiDA_output <- transitional_matrix %>%
+  cbind(LEiDA_dwell_time) %>%
+  cbind(LEiDA_fractional_occupancy)
+
+## Remove fractional occupancy and dwell time for PL state 1
+LEiDA_output <- LEiDA_output %>%
+  select(-dwell_time_1, -fractional_occupancy_1)
+
+## Merge with phenotypes
+LEiDA_output_phenotypes <- left_join(LEiDA_output, STRADL_phenotype_QC_covariates, by = "ID")
+```
+
+Check LEiDA output distribution
+
+```{r Transform LEiDA outputs, include = FALSE}
+## Fractional occupancy
+fractional_occupancy_vars <- grep("fractional_occupancy", names(LEiDA_output_phenotypes), value = T)
+#hist(sqrt(LEiDA_output_phenotypes[,fractional_occupancy_vars]))
+# LEiDA_output_phenotypes[paste("sqrt",fractional_occupancy_vars,sep="_")] <- sqrt(LEiDA_output_phenotypes[fractional_occupancy_vars])
+
+## Dwell time
+dwell_time_vars <- grep("dwell_time", names(LEiDA_output_phenotypes), value = T)
+#hist(sqrt(LEiDA_output_phenotypes[,dwell_time_vars]))
+# LEiDA_output_phenotypes[paste("sqrt",dwell_time_vars,sep="_")] <- sqrt(LEiDA_output_phenotypes[dwell_time_vars])
+
+## Transitional probability
+#hist.data.frame(sqrt(LEiDA_output_phenotypes[,grepl("to_cluster_", names(LEiDA_output_phenotypes))]))
+## Cannot normalize due to zero-inflation
+```
+
+Define functions to perform association analysis
+```{r Association analysis functions, include = FALSE}
+
+## Function to analyze LEiDA outputs between binary groups
+binary_assoc <- function(dependent, independent, covariates, dataset, type){
+  
+  ## Input:
+  ## dependent: names of dependent variables
+  ## independent: name of independent variable
+  ## covariates: variables to adjust for
+  ## dataset: df contating data
+  ## category: type of outcome
+  
+  ## Create dataframe to store association analysis output
+  output <-  data.frame(dependent_var=character(), dependent_cat=character(), beta=numeric(), std=numeric(), p.value=numeric(),
+                                             p.adjust=numeric(), Lower_95CI=numeric(), Upper_95CI=numeric(), n=numeric())
+  
+  for (dependent_index in 1:length(dependent)){ ## Iterate through dependent variables
+    
+    ## Define model
+    f <- paste0(dependent[dependent_index], " ~ ", independent,  " + " ,  paste(covariates, collapse = " + "))
+    
+    res <- glm(as.formula(f),
+                data = dataset,
+                na.action = na.exclude)
+    
+    output[dependent_index,"dependent_var"] <- dependent[dependent_index]
+    output[dependent_index, "beta"] <- summary(res)[["coefficients"]][independent, "Estimate"]
+    output[dependent_index, "std"] <- summary(res)[["coefficients"]][independent, "Std. Error"]
+    output[dependent_index, "p.value"] <- summary(res)[["coefficients"]][independent, "Pr(>|t|)"]
+    output[dependent_index, c("Lower_95CI", "Upper_95CI")] <- confint(res)[independent,]
+    output[dependent_index, c("n")] <- nobs(res)
+  }
+  
+  ## Indicate category of LEiDA output
+  output$dependent_cat <- type
+    
+  ## Adjust p-value
+  output$p.adjust <- p.adjust(output$p.value, method = "fdr")
+
+  return(output)
+}
+
+
+## Function to analyze LEiDA outputs between nominal groups
+group_assoc <- function(dependent, independent, covariates, dataset, type){
+  
+  ## Input:
+  ## dependent: names of dependent variables
+  ## independent: name of independent variable
+  ## covariates: array of covariates
+  ## dataset: df contating data
+  ## n_comparisons: number of multiple comparisons to account for
+  ## structural_subtype: name of structural subtype being analysed
+  
+  ## Create dataframe to store association analysis output
+  output <-  data.frame(dependent_var=character(), dependent_cat=character(), groups=character(), beta=numeric(), std=numeric(), p.value=numeric(),p.adjust=numeric(), Lower_95CI=numeric(), Upper_95CI=numeric(), n=numeric())
+  
+  for (dependent_index in 1:length(dependent)){
+    
+    f <- paste0(dependent[dependent_index], " ~ ", independent,  " + " ,  paste(covariates, collapse = " + "))
+    res <- aov(as.formula(f),
+                data = dataset)
+
+    ## If significant between group difference found, carry out pairwise assoication
+    if (summary(res)[[1]][independent, "Pr(>F)"] < 0.05){
+      
+      emmeans1 <- emmeans(res, specs = pairwise ~ comorbidity, adjust = "none")
+      
+      output[rep(dependent[dependent_index], 6), "dependent_var"] <-  dependent[dependent_index]
+      output[output$dependent_var == dependent[dependent_index], "groups"] <-  as.data.frame(emmeans1$contrasts)$contrast
+      output[output$dependent_var == dependent[dependent_index], "beta"] <-  as.data.frame(emmeans1$contrasts)["estimate"]
+      output[output$dependent_var == dependent[dependent_index], "std"] <-  as.data.frame(emmeans1$contrasts)["SE"]
+      output[output$dependent_var == dependent[dependent_index], "p.value"] <-  as.data.frame(emmeans1$contrasts)["p.value"]
+      output[output$dependent_var == dependent[dependent_index], c("Lower_95CI", "Upper_95CI")] <- confint(emmeans1$contrasts)[c(5,6)]
+      output[output$dependent_var == dependent[dependent_index], c("n")] <- nobs(res)
+
+    }else{
+      ## Do nothing
+    }
+  }
+  
+  ## If some significant differences were detected between groups, apply p-value adjustment
+  if(nrow(output) > 0){
+  
+    ## Adjust p-value
+    output$p.adjust <- p.adjust(output$p.value, method = "fdr")
+    
+    ## Indicate category of LEiDA output
+    output$dependent_cat <- type
+  }
+  return(output)
+}
+
+```
+
+
+Carry out association analysis in depression
+```{r Depression association, include=FALSE}
+
+## Fractional occupancy
+fractional_occupancy_names <- grep("fractional_occupancy", names(LEiDA_output_phenotypes), value = T)
+
+depression_fractional_occupancy <- binary_assoc(
+  dependent = fractional_occupancy_names,
+  independent = "current_depression",
+  covariates = c("Sex", "Site", "Age", "Age_squared"),
+  dataset = LEiDA_output_phenotypes,
+  type = "Fractional Occupancy"
+  )
+
+plot(LEiDA_output_phenotypes$fractional_occupancy_3 ~ LEiDA_output_phenotypes$current_depression)
+
+## Dwell times
+dwell_time_names <- grep("dwell_time", names(LEiDA_output_phenotypes), value = T)
+
+depression_dwell_time <- binary_assoc(
+  dependent = dwell_time_names,
+  independent = "current_depression",
+  covariates = c("Sex", "Site", "Age", "Age_squared"),
+  dataset = LEiDA_output_phenotypes,
+  type = "Dwell Time"
+  )
+```
+
+Carry out association analysis in pain
+```{r pain association, include=FALSE}
+
+## Fractional occupancy
+pain_fractional_occupancy <- binary_assoc(
+  dependent = fractional_occupancy_names,
+  independent = "current_pain",
+  covariates = c("Sex", "Site", "Age", "Age_squared"),
+  dataset = LEiDA_output_phenotypes,
+  type = "Fractional Occupancy"
+  )
+
+## Dwell time
+pain_dwell_time <- binary_assoc(
+  dependent = dwell_time_names,
+  independent = "current_pain",
+  covariates = c("Sex", "Site", "Age", "Age_squared"),
+  dataset = LEiDA_output_phenotypes,
+  type = "Dwell Time"
+  )
+
+```
+
+
+Carry out association analysis in comorbid chronic pain and depression
+```{r comorbidity association, include=FALSE}
+
+temp <- LEiDA_output_phenotypes
+temp$comorbidity_status <- ifelse(temp$comorbidity == "Pain+Dep+", 1, 0)
+
+model1 <- lm(fractional_occupancy_2 ~ Sex + Site + Age + Age_squared + current_depression:current_pain, data = temp)
+summary(model1)
+
+model2 <- lm(fractional_occupancy_2 ~ Sex + Site + Age + Age_squared + current_pain:current_depression, data = temp)
+summary(model2)
+
+
+
+## Fractional occupancy
+comorbidity_fractional_occupancy <- group_assoc(dependent = fractional_occupancy_names,
+            independent = "comorbidity",
+            covariates = c("Sex", "Site", "Age", "Age_squared"),
+            dataset = LEiDA_output_phenotypes,
+            type = "Fractional Occupancy"
+            )
+
+
+## Dwell time
+comorbidity_dwell_time <- group_assoc(dependent = dwell_time_names,
+            independent = "comorbidity",
+            covariates = c("Sex", "Site", "Age", "Age_squared"),
+            dataset = LEiDA_output_phenotypes,
+            type = "Dwell time"
+            )
+
+
+## Change contrast direction
+df_FO <- comorbidity_fractional_occupancy
+df_FO$groups <- paste(sub('.* - ', '', comorbidity_fractional_occupancy$groups), "-",sub(" - .*", "", comorbidity_fractional_occupancy$groups)) ## Switch order of groups
+df_FO$beta <- comorbidity_fractional_occupancy$beta * -1
+df_FO$Upper_95CI <- comorbidity_fractional_occupancy$Lower_95CI * -1
+df_FO$Lower_95CI <- comorbidity_fractional_occupancy$Upper_95CI * -1
+comorbidity_fractional_occupancy_switched <- df_FO
+rm(df_FO)
+
+df_DT <- comorbidity_dwell_time
+df_DT$groups <- paste(sub('.* - ', '', comorbidity_dwell_time$groups), "-",sub(" - .*", "", comorbidity_dwell_time$groups)) ## Switch order of groups
+df_DT$beta <- comorbidity_dwell_time$beta * -1
+df_DT$Upper_95CI <- comorbidity_dwell_time$Lower_95CI * -1
+df_DT$Lower_95CI <- comorbidity_dwell_time$Upper_95CI * -1
+comorbidity_dwell_time_switched <- df_DT
+rm(df_DT)
+```
+
+
+```{r plot results, include=FALSE}
+
+## Depression ----
+
+depression_fractional_occupancy <- depression_fractional_occupancy %>%
+  rename(
+    Cluster = dependent_var
+  ) %>%
+  mutate(Cluster = gsub("fractional_occupancy_", "", Cluster)) %>%
+  mutate(significant = ifelse(p.adjust < 0.05, "Yes", "No"))
+
+depression_dwell_time <- depression_dwell_time %>%
+  rename(
+    Cluster = dependent_var
+  ) %>%
+  mutate(Cluster = gsub("dwell_time_", "", Cluster)) %>%
+  mutate(significant = ifelse(p.adjust < 0.05, "Yes", "No"))
+  
+
+plot_depression_fractional_occupancy <-  ggplot(depression_fractional_occupancy, aes(x=forcats::fct_rev(Cluster), y=beta, shape=significant)) + 
+  geom_point(aes(y=beta),size=3, alpha = 0.5, col = "blue") +
+  geom_errorbar(aes(ymin=Lower_95CI, ymax=Upper_95CI), width=0, alpha = 0.5) +
+  theme_minimal() +
+  geom_hline(yintercept=0, linetype="dashed", color = "black") +
+  coord_flip() +
+  theme(text = element_text(size = 16)) +
+  labs(x = "Phase-Locking State",
+       y = "Beta Coefficient",
+       title = "Fractional Occupancy in Depression",
+       colour = "Comorbidity Group",
+       shape = "Adjusted p-value < 0.05")
+
+
+plot_depression_dwell_time <-  ggplot(depression_dwell_time, aes(x=forcats::fct_rev(Cluster), y=beta, shape=significant)) + 
+  geom_point(aes(y=beta),size=3, alpha = 0.5, col = "blue") +
+  geom_errorbar(aes(ymin=Lower_95CI, ymax=Upper_95CI), width=0, alpha = 0.5) +
+  theme_minimal() +
+  geom_hline(yintercept=0, linetype="dashed", color = "black") +
+  coord_flip() +
+  theme(text = element_text(size = 16)) +
+  labs(x = "Phase-Locking State",
+       y = "Beta Coefficient",
+       title = "Dwell Time in Depression",
+       colour = "Comorbidity Group",
+       shape = "Adjusted p-value < 0.05")
+
+
+## Pain ----
+
+pain_fractional_occupancy <- pain_fractional_occupancy %>%
+  rename(
+    Cluster = dependent_var
+  ) %>%
+  mutate(Cluster = gsub("fractional_occupancy_", "", Cluster)) %>%
+  mutate(significant = ifelse(p.adjust < 0.05, "Yes", "No"))
+
+pain_dwell_time <- pain_dwell_time %>%
+  rename(
+    Cluster = dependent_var
+  ) %>%
+  mutate(Cluster = gsub("dwell_time_", "", Cluster)) %>%
+  mutate(significant = ifelse(p.adjust < 0.05, "Yes", "No"))
+  
+
+plot_pain_fractional_occupancy <-  ggplot(pain_fractional_occupancy, aes(x=forcats::fct_rev(Cluster), y=beta, shape=significant)) + 
+  geom_point(aes(y=beta),size=3, alpha = 0.5, col = "blue") +
+  geom_errorbar(aes(ymin=Lower_95CI, ymax=Upper_95CI), width=0, alpha = 0.5) +
+  theme_minimal() +
+  geom_hline(yintercept=0, linetype="dashed", color = "black") +
+  coord_flip() +
+  theme(text = element_text(size = 16)) +
+  labs(x = "Phase-Locking State",
+       y = "Beta Coefficient",
+       title = "Fractional Occupancy in Pain",
+       colour = "Comorbidity Group",
+       shape = "Adjusted p-value < 0.05")
+
+
+plot_pain_dwell_time <-  ggplot(pain_dwell_time, aes(x=forcats::fct_rev(Cluster), y=beta, shape=significant)) + 
+  geom_point(aes(y=beta),size=3, alpha = 0.5, col = "blue") +
+  geom_errorbar(aes(ymin=Lower_95CI, ymax=Upper_95CI), width=0, alpha = 0.5) +
+  theme_minimal() +
+  geom_hline(yintercept=0, linetype="dashed", color = "black") +
+  coord_flip() +  
+  theme(text = element_text(size = 16)) +
+  labs(x = "Phase-Locking State",
+       y = "Beta Coefficient",
+       title = "Dwell Time in Pain",
+       colour = "Comorbidity Group",
+       shape = "Adjusted p-value < 0.05")
+
+## Comorbidity
+
+comorbidity_fractional_occupancy_switched <- comorbidity_fractional_occupancy_switched %>%
+  rename(
+    Cluster = dependent_var
+  ) %>%
+  mutate(Cluster = gsub("fractional_occupancy_", "Fractional Occupancy in Phase-Locking State ", Cluster)) %>%
+  mutate(significant = ifelse(p.adjust < 0.05, "Yes", "No")) %>%
+  mutate(groups_ordered = reorder_within(groups, beta, Cluster))
+
+plot_comorbidity_fractional_occupancy <-  ggplot(comorbidity_fractional_occupancy_switched, aes(x=groups_ordered, y=beta, col = groups, shape=significant)) + 
+  geom_point(aes(y=beta, col = groups),size=3, alpha = 0.8, position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin=Lower_95CI, ymax=Upper_95CI, col = groups), width=0, alpha = 0.5, position = position_dodge(width = 0.5)) +
+  theme_minimal() +
+  geom_hline(yintercept=0, linetype="dashed", color = "black") +
+  coord_flip() +
+  theme(text = element_text(size = 16),
+        axis.title=element_text(size=12)) +
+  labs(x = "",
+       y = "Beta Coefficient",
+       title = "",
+       colour = "Comparisons",
+       shape = "Adjusted p-value < 0.05") +
+  scale_x_reordered() +
+  facet_wrap(~Cluster, ncol=1, scales = 'free_y')
+  
+
+## Comorbidity
+
+comorbidity_dwell_time_switched <- comorbidity_dwell_time_switched %>%
+  rename(
+    Cluster = dependent_var
+  ) %>%
+  mutate(Cluster = gsub("dwell_time_", "Dwell Time in Phase-Locking State ", Cluster)) %>%
+  mutate(significant = ifelse(p.adjust < 0.05, "Yes", "No"))
+
+
+plot_comorbidity_dwell_time <-  ggplot(comorbidity_dwell_time_switched, aes(x=fct_reorder(groups, beta), y=beta, col = groups, shape=significant)) + 
+  geom_point(aes(y=beta, col = groups),size=3, alpha = 0.8, position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin=Lower_95CI, ymax=Upper_95CI, col = groups), width=0, alpha = 0.5, position = position_dodge(width = 0.5)) +
+  theme_minimal() +
+  theme(legend.position='none') + 
+  geom_hline(yintercept=0, linetype="dashed", color = "black") +
+  coord_flip() +
+  theme(text = element_text(size = 16),
+        axis.title=element_text(size=12)) +
+  labs(x = "",
+       y = "Beta Coefficient",
+       title = "",
+       colour = "Comparisons",
+       shape = "Adjusted p-value < 0.05")+
+  facet_wrap(~Cluster, ncol=1)
+
+
+jpeg(file=paste0("~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/LEiDA_depression.jpeg"), width = 1500, height = 2000, res = 200)
+plot_depression_fractional_occupancy / plot_depression_dwell_time
+dev.off()
+
+jpeg(file=paste0("~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/LEiDA_pain.jpeg"), width = 1500, height = 2000, res = 200)
+plot_pain_fractional_occupancy / plot_pain_dwell_time
+dev.off()
+
+jpeg(file=paste0("~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/LEiDA_comorbidity.jpeg"), width = 2000, height = 2000, res = 200)
+plot_comorbidity_fractional_occupancy / plot_comorbidity_dwell_time + plot_layout(widths = c(2, 1), heights = unit(c(15, 1), c('cm', 'null')))
+dev.off()
+
+```
+
+```{r save results}
+
+write.csv(depression_fractional_occupancy, "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/main_output/depression_fractional_occupancy.csv")
+write.csv(depression_dwell_time, "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/main_output/depression_dwell_time.csv")
+
+write.csv(pain_fractional_occupancy, "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/main_output/pain_fractional_occupancy.csv")
+write.csv(pain_dwell_time, "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/main_output/pain_dwell_time.csv")
+
+write.csv(comorbidity_fractional_occupancy, "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/main_output/comorbidity_fractional_occupancy.csv")
+write.csv(comorbidity_dwell_time_switched, "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/results/LEiDA/main_output/comorbidity_dwell_time.csv")
+
+```
+
+
+
+

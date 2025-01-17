@@ -1,0 +1,94 @@
+General Changes:
+
+- ParcelsMNI2mm was saved in a format that has each parcellation scheme in a structure, e.g.:
+AAL116.volume
+AAL116.labels
+
+This includes also the labels for Yeo7, whith the labels of Yeo7 also included here instead of within code, 
+and the two extra networks removed from the volume (which was instead saved as Yeo9)
+
+- introduce "run" script that has ALL parameters needed to run the analyses and calls the respective functions
+instead of having mulitple scripts to run wherein the parameters need to be defined multiple times.
+
+- in this run script extend a parcellation field to have 
+	-name - defined based on possibleOptions to know which to load
+	-areas - in terms of labelIDs
+	-areas2remove - in terms of labelIDs
+	-n_areas
+	-YeoAtlas (with the aim of potentially using the 9 regions - not yet possible because colours are fixed to 7 in code) 
+
+- because of the above transform LEiDA_AnalysisCentroid, LEiDA_AnalysisK, LEiDA_Start, LEiDA_StateTime and LEiDA_TransistionsK 
+into functions that receive parameter structure with relevant parameters extracted from there 
+
+- use "fullfile" instead of [] in all instances (did not change in Parcellate and Parcellate_ABIDE or subjstair) 
+to avoid the need of thinking about putting  "/" at the end when defining paths and to make it compatible with Mac as well
+
+
+
+LEiDA_Start
+- only run part specific function if you haven't already before
+
+Plot_K_3Dbrain & Plot_K_links_in_cortex & Plot_K_nodes_in_cortex & Plot_K_repertoire & Parcellate
+- struct2array was not working for us so implemented workaround using load
+
+cluster_stability
+- loading of cluster data commented out because it is not used in the calculation of cluster stability
+
+LEiDA_stats_FracOccup
+-saved 'pair' in output as it was being called in another script loading the FaccOcc file
+
+LEiDA_stats_TransitionMatrix
+-TM_pval2sided saved as well because it is loaded on plot_k_diffs_transitions
+
+Overlap_Yeo
+- change parcellation call to parcellation.name when loading parcellation and n_areas by parcellation.n_areas.
+- parcellation also includes field areas2remove. adapt the putting non interesting areas to zero within the script and calculate n_areas
+based on number of unique labels (instead of assuming that lables are contiguous)
+%[cc_V_yeo7, p_V_yeo7] = Overlap_LEiDA_Yeo(parcellation,n_areas,Kmeans_results,rangeK); % commented by JL
+[cc_V_yeo7, p_V_yeo7] = Overlap_LEiDA_Yeo(parcellation,Kmeans_results,rangeK); % added by JL
+
+Plot_Centroid_Pyramid
+-remove the need to input n_areas (to make it consistent with other the other plot functions) and instead input "areas2remove". 
+change this also in LEiDA_Start, where the function is being called, and within the function in the output to overlap_LEiDA_Yeo
+
+
+
+Plot_C_boxplot_DT
+Plot_C_boxplot_FO
+Plot_C_summary
+Plot_K_3Dbrain
+Plot_K_boxplot_DT
+Plot_K_boxplot_FO
+Plot_K_overlap_yeo_nets
+Plot_K_repertoire
+Plot_K_V1_VoxelSpace
+Plot_Centroid_Pyramid
+- removed n_areas from within the script and as input to Overlap_LEiDA_Yeo
+
+Plot_C_summary
+Plot_C_vector_labelled
+Plot_C_vector_ordered
+Plot_K_vector_labelled
+- changed way labels of parcellation are selected
+
+Plot_C_summary
+Plot_C_vector_labelled
+Plot_C_vector_ordered
+Plot_K_3Dbrain
+Plot_K_links_in_cortex
+Plot_K_nodes_in_cortex
+Plot_K_repertoire
+Plot_Centroid_Pyramid
+- changed parcellation call to parcellation.name when loading parcellation
+
+
+Plot_K_links_in_cortex, Plot_K_nodes_in_cortex
+- changed MNI_coord definition to grab appropriate labels from parcellation assuming non-continugous/non-first n-labels
+
+Plot_K_3Dbrain, Plot_K_repertoire, Plot_C_summary
+- changed why region to plot is selected in order to account for non contiguous regions in atlas
+
+
+Parcellate
+- check if zipped or not automatically
+- change input to be parcellation.name and parcellation.n_areas

@@ -1,0 +1,107 @@
+---
+title: "Untitled"
+author: "Hannah Casey"
+date: '2023-02-13'
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(MatchIt)
+#install.packages("rjson")
+library(rjson)
+library(data.table)
+set.seed(151097)
+#install.packages("R.matlab")
+library(R.matlab)
+set.seed(151097)
+```
+
+
+Load in brainnetome atlas BOLD timseries (confounds removed via ICA-AROMA and aCompCor)
+
+```{r setup, include=FALSE}
+
+BOLD_timeseries_list <- list.files(path="/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/BOLD_brainnetome/",
+pattern=glob2rx("*corrMatrix_atlas-power2011Dseg_timeseries.tsv"), full.names = T)
+
+BOLD_timeseries_df_list = lapply(BOLD_timeseries_list, function(x)read.table(x, header=F)) 
+
+## Use STRADL IDs as list names
+names(BOLD_timeseries_df_list) <-  gsub("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/BOLD_brainnetome//sub-|_task-resting_feature-corrMatrix_atlas-power2011Dseg_timeseries.tsv|_task-Resting_feature-corrMatrix_atlas-power2011Dseg_timeseries.tsv","", BOLD_timeseries_list)
+
+## Remove "Buckner2011_17Networks" areas from timeseries data columns 247:263
+#BOLD_timeseries_df_list <- lapply(BOLD_timeseries_df_list, "[", TRUE, -c(247:263))
+```
+
+Load in STRADL phenotypes and covariates
+```{r STRADL Phenotypes, include=FALSE}
+## Get STRADL phenotypes
+STRADL_phenotype_QC_covariates <-  read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_phenotype_QC_covariates.csv", header = T)
+```
+
+Get total number of regions available with no NaNs
+```{r get non-missing regions}
+
+## Get number of regions containing NaN in participants
+NaN_regions <- NULL
+
+STRADL_IDs <- STRADL_phenotype_QC_covariates$ID
+
+for (participant in STRADL_IDs){
+  
+  NaN_regions <- c(NaN_regions, colnames(BOLD_timeseries_df_list[[participant]])[colSums(is.na(BOLD_timeseries_df_list[[participant]])) > 0])
+  
+}
+
+NaN_regions <- unique(NaN_regions)
+sort(as.numeric(gsub("V", "",unique(NaN_regions))))
+```
+
+Assign participants to groups based on depression, pain and comorbidity phenotypes
+
+```{r Load in disorder phentypes}
+
+STRADL_depression_groups <- STRADL_phenotype_QC_covariates[c("ID", "current_depression")]
+
+STRADL_depression_groups <- subset(STRADL_depression_groups, STRADL_depression_groups$ID %in% STRADL_IDs)
+
+```
+
+For each STRADL participant, who passed fMRI QC and has available phenotyping data, save BOLD time series at MAT file and random group
+
+```{r}
+
+## Depression
+depression_data_dir <- "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/resources/BOLD/LEiDA/power/ICA/"
+
+## Create new list to store timeseries with no NA
+BOLD_timeseries_df_list_depression <- BOLD_timeseries_df_list
+
+for (participant in STRADL_IDs){
+  
+  ## Identify if participant has current depression
+  if (STRADL_depression_groups$current_depression[STRADL_depression_groups$ID == participant] == 1){
+    group <- "_case"
+  }else{
+    group <- "_control"
+  }
+  
+  ## Remove NaN values from matrix
+  BOLD_timeseries_df_list_depression[[participant]] <- BOLD_timeseries_df_list_depression[[participant]][,!colnames(BOLD_timeseries_df_list_depression[[participant]]) %in% NaN_regions]
+  
+  ## Print "writeMat" commands to be copy and pasted - cannot be run in loop
+  cat(paste0("writeMat('", depression_data_dir, participant, group, ".mat', ", paste0(participant, group)," = t(as.matrix(BOLD_timeseries_df_list_depression[['", participant, "']])))", "\n"))
+}
+
+```
+
+
+```{r Save MAT files}
+
+
+
+
+
+```
+

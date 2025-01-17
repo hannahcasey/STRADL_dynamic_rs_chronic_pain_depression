@@ -1,0 +1,152 @@
+---
+title: "Prepare STRADL phenotypes"
+author: "Hannah Casey"
+date: "2023-02-15"
+output: html_document
+---
+The purpose of this script is to prepare STRADL phenotypes. This will include:
+  - Combining derived phenotypes into single file
+  - Removing participants without acceptable fMRI data
+  - Removing related individuals
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(tidyverse)
+library(data.table)
+```
+
+
+Load in pain level, current MDD and comorbidity phenotype files
+```{r load in phenotypes}
+STRADL_current_depression <- read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_MDD.csv", header = TRUE)
+STRADL_pain <- read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_pain.csv", header = TRUE)
+STRADL_comorbidity <- read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_comorbidity.csv", header = TRUE)
+```
+
+Merge phenotypes
+```{r load in phenotypes}
+STRADL_phenotype <- STRADL_current_depression %>%
+  full_join(STRADL_pain, by='ID') %>%
+  full_join(STRADL_comorbidity[c("ID", "comorbidity")], by='ID') %>%
+  select(ID, current_depression, current_pain, comorbidity, QIDS)
+```
+
+Load in STRADL bridge file
+```{r load bridge file}
+## Load in STRADL bridge file
+STRADL_bridge <- read_tsv("/Volumes/mcintosh-gs-linkage/data/patient/gs-mysql/st_ids.tsv.gz")
+STRADL_bridge$id <- as.numeric(STRADL_bridge$id)
+```
+
+Get list of participants with rs-fMRI data
+```{r rs-fMRI list}
+fMRI_list <- list.files("/Volumes/STRADL/Functional/Resting/Data", pattern = "*.nii")
+fMRI_list <- gsub("_resting.nii", "", fMRI_list)
+```
+
+Get IDs of participants who passed fMRI QC
+```{r get QC fMRI list}
+## Load QC files
+AB_exclude <- rjson::fromJSON(file = "/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/HALFpipe_QC_exclude/AB_exclude.json")
+DU_exclude <- rjson::fromJSON(file = "/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/HALFpipe_QC_exclude/DU_exclude.json")
+
+## combine exclude files
+exclude <- c(AB_exclude, DU_exclude)
+
+## Create dataframe summarising QC rating for STRADL participants
+exclude <- Map(as.data.frame, exclude)
+exclude <- rbindlist(exclude, fill=TRUE)
+
+exclude <- exclude %>%
+  group_by(sub) %>%
+  mutate(exlude = ifelse((any(rating == "bad") | (n() < 6)), 1,0)) %>% ## if any rating is bad for each participant or where there are less than 6 QC ratings, exclude
+  select(sub, exlude) %>%
+  unique()
+
+exclude$sub[exclude$exlude == 0]
+
+## Only keep participants with acceptable fMRI data
+STRADL_phenotype_QC <- STRADL_phenotype[STRADL_phenotype$ID %in% exclude$sub[exclude$exlude == 0],]
+```
+
+
+Load in genetic relationship matrix for GS participants and keep only STRADL participants
+
+```{r get unrelated}
+## Read in STRADL relatedness matrix
+STRADL_relatedness_matrix <- read.table("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_relatedness_matrix.txt", row.names = 1)
+names(STRADL_relatedness_matrix) <- gsub("X", "", names(STRADL_relatedness_matrix))
+
+## For each STRADL participant get list of participants with at least 2nd degree in STRADL
+STRADL_get_relatives <- NULL
+
+for (get_row in 1:nrow(STRADL_relatedness_matrix)){
+
+  temp <- data_frame(IID1 = rownames(STRADL_relatedness_matrix)[get_row], IID2 = colnames(STRADL_relatedness_matrix)[STRADL_relatedness_matrix[get_row,] >= 0.25])
+
+  STRADL_get_relatives <- rbind(STRADL_get_relatives, temp)
+
+}
+
+## Change GS IDs to STRDL IDs
+STRADL_get_relatives$IID1 <- STRADL_bridge$st[match(STRADL_get_relatives$IID1 , STRADL_bridge$id)]
+STRADL_get_relatives$IID2 <- STRADL_bridge$st[match(STRADL_get_relatives$IID2 , STRADL_bridge$id)]
+
+## Prioritize STRADL participants with Pain+MDD+, Pain+MDD- and Pain-MDD+ (in this order)
+## Get IDs of participants to prioritize
+priority1 <- STRADL_phenotype$ID[STRADL_phenotype$comorbidity == "Pain+Dep+"]
+priority2 <- STRADL_phenotype$ID[STRADL_phenotype$comorbidity == "Pain+Dep-"]
+priority3 <- STRADL_phenotype$ID[STRADL_phenotype$comorbidity == "Pain-Dep+"]
+
+## Remove rows where "IID1" and "IID2" are the same
+STRADL_get_relatives <- STRADL_get_relatives[!STRADL_get_relatives$IID1 == STRADL_get_relatives$IID2,]
+
+## Remove one of two rows containing the same information, e.g. IID1 = 5, IID2 = 10 and IID1 = 10, IID2 = 5
+STRADL_get_relatives <- STRADL_get_relatives[!duplicated(apply(STRADL_get_relatives,1,function(x) paste(sort(x),collapse=''))),]
+
+## Get list of participants related to high priority participants
+related_priority1 <- STRADL_get_relatives$IID2[STRADL_get_relatives$IID1 %in% priority1]
+related_priority1 <- c(related_priority1, STRADL_get_relatives$IID1[STRADL_get_relatives$IID2 %in% priority1])
+
+related_priority2 <- STRADL_get_relatives$IID2[STRADL_get_relatives$IID1 %in% priority2]
+related_priority2 <- c(related_priority2, STRADL_get_relatives$IID1[STRADL_get_relatives$IID2 %in% priority2])
+
+related_priority3 <- STRADL_get_relatives$IID2[STRADL_get_relatives$IID1 %in% priority3]
+related_priority3 <- c(related_priority3, STRADL_get_relatives$IID1[STRADL_get_relatives$IID2 %in% priority3])
+
+## Move all relatives of high priority participants to left column
+STRADL_get_relatives$IID1_temp <- STRADL_get_relatives$IID1
+STRADL_get_relatives$IID1[STRADL_get_relatives$IID2 %in% related_priority3] <- STRADL_get_relatives$IID2[STRADL_get_relatives$IID2 %in% related_priority3]
+STRADL_get_relatives$IID2[STRADL_get_relatives$IID2 %in% related_priority3] <- STRADL_get_relatives$IID1_temp[STRADL_get_relatives$IID2 %in% related_priority3]
+STRADL_get_relatives$IID1_temp <- STRADL_get_relatives$IID1
+STRADL_get_relatives$IID1[STRADL_get_relatives$IID2 %in% related_priority2] <- STRADL_get_relatives$IID2[STRADL_get_relatives$IID2 %in% related_priority2]
+STRADL_get_relatives$IID2[STRADL_get_relatives$IID2 %in% related_priority2] <- STRADL_get_relatives$IID1_temp[STRADL_get_relatives$IID2 %in% related_priority2]
+STRADL_get_relatives$IID1_temp <- STRADL_get_relatives$IID1
+STRADL_get_relatives$IID1[STRADL_get_relatives$IID2 %in% related_priority1] <- STRADL_get_relatives$IID2[STRADL_get_relatives$IID2 %in% related_priority1]
+STRADL_get_relatives$IID2[STRADL_get_relatives$IID2 %in% related_priority1] <- STRADL_get_relatives$IID1_temp[STRADL_get_relatives$IID2 %in% related_priority1]
+
+## Remove those without rs-fMRI data
+STRADL_phenotype_QC <- STRADL_phenotype_QC[STRADL_phenotype_QC$ID %in% fMRI_list,]
+
+## Remove one of each related pair from phenotypes
+STRADL_phenotype_QC_unrelated <- STRADL_phenotype_QC[!STRADL_phenotype_QC$ID %in% STRADL_get_relatives$IID1,]
+
+table(STRADL_phenotype$comorbidity)
+```
+
+
+Get STRADL covariates
+```{r STRADL covariates}
+STRADL_covariates <- read.csv("/Volumes/STRADL/Collated/STRADL-Measures-Phenotypic/STRADL_Demographics.csv", header = TRUE)
+
+STRADL_phenotype_QC_covariates <- STRADL_phenotype_QC_unrelated %>%
+  left_join(STRADL_covariates) %>%
+  mutate(Site = ifelse(grepl("AB", ID), "AB", "DU"))  %>%
+  mutate(Age_squared = Age*Age)
+
+## Save phenotypes and covariates 
+write.csv(STRADL_phenotype_QC_covariates, "/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_phenotype_QC_covariates.csv", row.names = FALSE, quote = FALSE)
+```
+
+
+

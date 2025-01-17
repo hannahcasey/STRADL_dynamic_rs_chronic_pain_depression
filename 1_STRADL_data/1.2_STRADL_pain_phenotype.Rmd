@@ -1,0 +1,210 @@
+---
+title: "STRADL_pain_phenotype"
+author: "Hannah Casey"
+date: '2023-01-23'
+output: html_document
+---
+
+```{r load packages, include=FALSE}
+library(tidyr)
+library(dplyr)
+library(readr)
+library(stringr)
+library(data.table)
+library(lubridate)
+```
+
+Load in self-reported medication at the time of STRADL MRI scan. Get total STRADL participatns who reportd not taking medication vs those who reported taking some medications.
+
+```{r load in medication}
+STRADL_self_reported_medication <- read.csv("/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_Meds_Freetext.csv", header = TRUE)
+table(STRADL_self_reported_medication$Current_Meds == "None")
+```
+
+Split string of current medications into new row where there is a comma in "Current_Meds". 
+```{r format medications}
+## Seperate lists of medications into seperate rows
+STRADL_self_reported_medication <- STRADL_self_reported_medication %>%               
+  separate_rows(Current_Meds, sep=",") %>% ## Where there is a column in medications recorded, create a new row
+  mutate(Current_Meds = toupper(Current_Meds)) %>% ## convert medication names to upper case
+  mutate(Current_Meds = str_trim(Current_Meds)) ## remove white space either side of medication names
+```
+
+Load in GS prescription data to get list of analgesics prescribed to all GS
+
+```{r load in GS prescription data and get names of all analgesics ever prescribed}
+## Load in prescription data of GS
+GS_prescription <- read_tsv("/Volumes/mcintosh-gs-linkage/data/patient/gs-mysql/gs_pis20_full.tsv.gz")
+
+## Get list of analgesic medications
+## 4.3.1.B0: Amitriptyline
+## 10.1.1: Non-steroidal anti-inflammatory drugs
+## 10.3.2: Rubefacients, topical NSAIDs, capsaicin and poultices
+## 4.7: Analgesics
+
+pain_BNF <- c("0403010B0", "100101", "100302", "0407")
+GS_prescription_pain_generic <- unique(GS_prescription$approved[grepl(paste(pain_BNF, collapse = "|^"), GS_prescription$bnf)])
+GS_prescription_pain_branded <- unique(GS_prescription$drug[grepl(paste(pain_BNF, collapse = "|^"), GS_prescription$bnf)])
+GS_prescription_pain <- unique(c(GS_prescription_pain_generic, GS_prescription_pain_branded))
+
+## Add two misspellings of "Amitriptyline"
+GS_prescription_pain <- c(GS_prescription_pain, "AMATRIPTYLINE",  "AMITRIPILINE")
+
+## Save list of analgesic medications
+write.csv(as.data.frame(sort(GS_prescription_pain)), "~/Desktop/PhD/projects/STRADL_dynamic_rs_chronic_pain_depression/resources/analgecis_meds.csv")
+
+```
+
+Using drug names (both generic and branded) identify STRADL participants with self-reported analgesic drug use at time of imaging. Categorize severity of pain based on type of analgesic(s) reported.
+
+```{r Identify self-reported analgesic used at scan}
+## Indicate where analgesics were taken at time of imaging
+STRADL_self_reported_medication$analgesics_self_report <- 0
+STRADL_self_reported_medication$analgesics_self_report[grepl(paste(GS_prescription_pain,collapse="|"), STRADL_self_reported_medication$Current_Meds)] <- 1
+```
+
+Identify where analgesics were prescribed the month of MRI scan
+```{r Indentify analgesic prescription month of MRI}
+## Load prescription information for STRADL participants 
+STRADL_prescription <- read_tsv("/Volumes/mcintosh-gs-linkage/data/patient/gs-mysql/st_pis20_full.tsv.gz")
+
+## Select ID, prescription date, BNF code, approved drug name, dosage and quantity.
+## Change prescription date format
+STRADL_prescription <- STRADL_prescription %>%
+  mutate(prescription_date =  ym(dt)) %>%
+  select(id, prescription_date, bnf, approved, strength) %>%
+  mutate(id = as.character(id)) %>%
+  rename(ID = id)
+
+## Load in STRADL imaging times
+STRADL_MRI_date <- read_tsv("/Volumes/mcintosh-gs-linkage/data/patient/gs-mysql/st_ids.tsv.gz")
+
+STRADL_MRI_date <- STRADL_MRI_date %>%
+  mutate(MRI_date =  lubridate::floor_date(as.Date(dt, format = "%d/%m/%Y"), unit = "month")) %>% ## change data to the first of each month to match prescription data
+  select(st, id, MRI_date) %>% ## limit to ID and date columns
+  rename(ID = id) 
+
+## Merge STRADL MRI date and prescription data by GS ID
+STRADL_prescription_MRI_date <- left_join(STRADL_prescription, STRADL_MRI_date, by = "ID")
+
+## Indicate imaging concurrent prescriptions 
+## As prescription data is recorded by month, rather than by day, include all prescripts made in the month before and the month of MRI assessment
+STRADL_prescription_MRI_date$concurrent <- 0
+STRADL_prescription_MRI_date$concurrent[STRADL_prescription_MRI_date$MRI_date == STRADL_prescription_MRI_date$prescription_date] <- 1
+STRADL_prescription_MRI_date$concurrent[(STRADL_prescription_MRI_date$MRI_date - STRADL_prescription_MRI_date$prescription_date) == 30] <- 1
+STRADL_prescription_MRI_date$concurrent[(STRADL_prescription_MRI_date$MRI_date - STRADL_prescription_MRI_date$prescription_date) == 31] <- 1
+STRADL_prescription_MRI_date$concurrent[(STRADL_prescription_MRI_date$MRI_date - STRADL_prescription_MRI_date$prescription_date) == 29] <- 1
+STRADL_prescription_MRI_date$concurrent[(STRADL_prescription_MRI_date$MRI_date - STRADL_prescription_MRI_date$prescription_date) == 28] <- 1
+
+## Indicate where concurrent analgesic were prescribed
+## 4.3.1.B0: Amitriptyline
+## 10.1.1: Non-steroidal anti-inflammatory drugs
+## 10.3.2: Rubefacients, topical NSAIDs, capsaicin and poultices
+## 4.7: Analgesics
+
+STRADL_prescription_MRI_date$concurrent_analgesic_prescription <- 0
+STRADL_prescription_MRI_date$concurrent_analgesic_prescription[STRADL_prescription_MRI_date$concurrent == 1 & grepl("^0403010B0|^100101|^100302|^0407", STRADL_prescription_MRI_date$bnf)] <- 1
+
+## Indicate where analgesic medication, that may also be used to treat CVD was prescribed concurrent with imaging
+CVD_drugs <- STRADL_prescription_MRI_date$approved[grepl("^02", STRADL_prescription_MRI_date$bnf)]
+CVD_analgesics <- intersect(CVD_drugs,GS_prescription_pain )
+STRADL_prescription_MRI_date$concurrent_analgesic_CVD <- 0
+STRADL_prescription_MRI_date$concurrent_analgesic_CVD[STRADL_prescription_MRI_date$concurrent_analgesic_prescription & grepl(paste(CVD_analgesics, collapse = "|"),STRADL_prescription_MRI_date$approved) & grepl("^02", STRADL_prescription_MRI_date$bnf)] <- 1
+table(STRADL_prescription_MRI_date$concurrent_analgesic_CVD) ## No participants found
+
+## Get IDs with a high dose of amitriptyline prescribed - may be indication of depression treatment, not pain
+IDs_concurrent_high_dose_amitriptyline <- unique(STRADL_prescription_MRI_date$st[grepl("^0403010B0", STRADL_prescription_MRI_date$bnf) &
+                                                   STRADL_prescription_MRI_date$strength == "50 MG" &
+                                                   STRADL_prescription_MRI_date$concurrent_analgesic_prescription == 1])
+```
+
+Get pain cases and controls
+
+```{r identify self-reported analgesic use}
+## IDs with self-reported analgesic use
+IDs_self_reported_medication <- NULL
+for (ID in unique(STRADL_self_reported_medication$ID)){
+  
+  temp <- STRADL_self_reported_medication[STRADL_self_reported_medication$ID == ID,]
+  
+  if(ID %in% IDs_concurrent_high_dose_amitriptyline){ ## If high dose of prescription amitriptyline
+    
+    temp$analgesics_self_report[grepl("AMITRIPTYLINE|AMATRIPTYLINE|AMITRIPILINE", temp$Current_Meds)] <- 0 ## Remove amitriptyline as self-reported analgesics
+    
+  }
+  
+  if(sum(temp$analgesics_self_report) == 1){ ## If there is at least one self-reported analgesic
+    bin <- 1 ## Record as case
+  } else{
+    bin <- 0 ## Otherwise don't
+  }
+
+  if(bin){
+    IDs_self_reported_medication <- c(IDs_self_reported_medication, ID)
+  }
+}
+
+## Get list of those with high dose amitriptyline but no other self-reported analgesic
+IDs_self_reported_amitriptyline_only <- IDs_concurrent_high_dose_amitriptyline[!IDs_concurrent_high_dose_amitriptyline %in% IDs_self_reported_medication]
+
+## IDs with concurrent prescription analgesics
+IDs_prescription <- NULL
+for (ID in unique(STRADL_prescription_MRI_date$st)){
+  
+  temp <- STRADL_prescription_MRI_date[STRADL_prescription_MRI_date$st == ID,]
+  
+  if(ID %in% IDs_concurrent_high_dose_amitriptyline){ ## If high dose of prescription amitriptyline
+    
+    temp$concurrent_analgesic_prescription[grepl("^0403010B0", temp$bnf)] <- 0 ## Remove amitriptyline as analgesic analgesics
+    
+    if(sum(temp$concurrent_analgesic_prescription) > 0){ ## If at least on concurrent analgesic prescription, count as a case
+      bin <- 1
+    } else{
+      bin <- 0 ## Otherwise don't
+    }
+  } else{
+    
+    if(sum(temp$concurrent_analgesic_prescription) > 0){ ## If one or more analgecis recorded
+      bin <- 1 ## Record as case
+    } else{
+      bin <- 0 ## Otherwise dont
+    }
+  }
+  
+  if(bin){
+    IDs_prescription <- c(IDs_prescription, ID)
+  }
+}
+
+## Get list of those with high dose amitriptyline but no other prescribed analgesic
+IDs_prescribed_amitriptyline_only <- IDs_concurrent_high_dose_amitriptyline[!IDs_concurrent_high_dose_amitriptyline %in% IDs_prescription]
+
+## Get list of those with only high dose amitriptyline in both self-report and prescription medication
+IDs_amitriptyline_remove <- intersect(IDs_prescribed_amitriptyline_only, IDs_self_reported_amitriptyline_only)
+
+
+## Define pain cases and controls
+STRADL_pain <- data.frame(ID = unique(c(STRADL_prescription_MRI_date$st, STRADL_self_reported_medication$ID)))
+
+STRADL_pain$self_reported_analgesic <- 0
+STRADL_pain$self_reported_analgesic[STRADL_pain$ID %in% IDs_self_reported_medication] <- 1
+
+STRADL_pain$concurrent_analgesic_prescription <- 0
+STRADL_pain$concurrent_analgesic_prescription[STRADL_pain$ID %in% IDs_prescription] <- 1
+
+STRADL_pain$current_pain <- 0
+STRADL_pain$current_pain[STRADL_pain$self_reported_analgesic == 1 | STRADL_pain$concurrent_analgesic_prescription == 1] <- 1
+STRADL_pain$current_pain[STRADL_pain$ID %in% IDs_prescribed_amitriptyline_only] <- NA ## Remove those with only high-dose amitriptyline and not other analgesics in self-report and prescription data
+
+table(STRADL_pain$current_pain)
+
+```
+
+
+
+Save pain phenotype
+
+```{r save MDD phenotype}
+write.csv(STRADL_pain, "/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_pain.csv", row.names = FALSE, quote = FALSE)
+```
+

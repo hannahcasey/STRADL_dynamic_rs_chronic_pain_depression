@@ -1,0 +1,42 @@
+---
+title: "STRADL current depression phenotype"
+author: "Hannah Casey"
+date: '2023-02-07'
+output: html_document
+---
+
+
+```{r load packages, include=FALSE}
+library(dplyr)
+library(tidyverse)
+```
+
+Load in QIDS summary at STRADL imaging assessment
+
+```{r load in QIDs}
+GS_QIDS <- read.csv("/Volumes/STRADL/Collated/STRADL-Measures-Phenotypic/STRADL_Scores_QIDS.csv", header = TRUE)
+
+## Assign current depression status to STRADL participants
+GS_QIDS$current_depression <- NA
+GS_QIDS$current_depression[GS_QIDS$Severity == 0] <- 0
+GS_QIDS$current_depression[GS_QIDS$Severity >= 1] <- 1
+
+table(GS_QIDS$current_depression)
+
+```
+
+Save current MDD SCID diagnosis
+
+```{r save MDD phenotype}
+
+write.csv(GS_QIDS, "/Volumes/GenScotDepression/users/hcasey/rs_fMRI_STRADL_CP_MDD/resources/STRADL_MDD.csv", row.names = FALSE, quote = FALSE)
+
+```
+
+
+
+
+
+
+
+
